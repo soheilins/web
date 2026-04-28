@@ -49,8 +49,9 @@ jobs:
         run: playwright install chromium
 
       - name: Poll queue, generate PDFs, send to Rubika
+        shell: python   # 🔥 This line makes the step run as Python instead of Bash
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}   # توکن ربات روبیکا
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           import os, time, subprocess, sys, requests
 
@@ -92,7 +93,6 @@ jobs:
                   if url == "0" or not url.startswith(("http://", "https://")):
                       continue
 
-                  # تولید PDF
                   res = subprocess.run(
                       [sys.executable, "generate_pdf.py", url, "pdfs"],
                       capture_output=True, text=True
@@ -102,11 +102,9 @@ jobs:
 
                   pdf_path = res.stdout.strip().split("PDF generated: ")[-1]
 
-                  # ارسال به مخزن
                   subprocess.run(["git", "add", pdf_path])
                   subprocess.run(["git", "commit", "-m", f"Add PDF for {url}"])
 
-                  # ارسال به روبیکا
                   chat_id = get_chat_id()
                   if chat_id:
                       try:
@@ -117,7 +115,6 @@ jobs:
                       except Exception as e:
                           print(f"Send failed: {e}")
 
-              # پاک کردن صف
               open(QUEUE, 'w').close()
               subprocess.run(["git", "add", QUEUE])
               subprocess.run(["git", "commit", "-m", "Process queue"])
