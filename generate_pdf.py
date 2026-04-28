@@ -62,7 +62,6 @@ def apply_custom_clicks(page, click_string):
     texts = [t.strip() for t in click_string.split(",") if t.strip()]
     for text in texts:
         try:
-            # Match any element with this text (buttons, links, etc.)
             elements = page.get_by_text(text, exact=False)
             count = elements.count()
             for i in range(count):
@@ -87,8 +86,12 @@ def generate_pdf(url, output_path, extra_clicks=None):
         # Apply any user-requested extra clicks
         apply_custom_clicks(page, extra_clicks)
 
-        # Final scroll to trigger lazy images
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        # Safe scroll to trigger lazy images (only if body exists)
+        page.evaluate("""() => {
+            if (document.body) {
+                window.scrollTo(0, document.body.scrollHeight);
+            }
+        }""")
         page.wait_for_timeout(1000)
 
         page.pdf(path=output_path, format="A4", print_background=True)
