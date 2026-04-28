@@ -24,6 +24,24 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Cache pip packages
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}-${{ hashFiles('.github/workflows/generate-pdf.yml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      # Cache Playwright browsers
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('.github/workflows/generate-pdf.yml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
       - name: Install system dependencies for Chromium
         run: |
           sudo apt-get update
@@ -39,6 +57,9 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install playwright
+
+      - name: Install Chromium (only if cache missed)
+        run: |
           playwright install chromium
 
       - name: Generate PDF
