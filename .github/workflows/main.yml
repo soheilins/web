@@ -9,7 +9,7 @@ permissions:
 jobs:
   poll-loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 360   # 6 hours
 
     steps:
       - uses: actions/checkout@v4
@@ -58,12 +58,15 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          import os, time, subprocess, sys, requests
+          import os, time, subprocess, sys, requests, json
 
           BOT_TOKEN = os.environ["BOT_TOKEN"]
+          BASE_API = f"https://botapi.rubika.ir/v3/{BOT_TOKEN}"
+          REQUEST_SEND_FILE_URL = f"{BASE_API}/requestSendFile"
+          SEND_FILE_URL = f"{BASE_API}/sendFile"
+
           QUEUE = "queue.txt"
           CHAT_ID_FILE = "chat_id.txt"
-          SEND_FILE_URL = f"https://botapi.rubika.ir/v3/{BOT_TOKEN}/sendFile"
           BRANCH = "${{ github.ref_name }}"
 
           def get_chat_id():
@@ -72,6 +75,37 @@ jobs:
                       return f.read().strip()
               except:
                   return None
+
+          def upload_and_send_file(chat_id, file_path):
+              """Upload file to Rubika (3 steps) and send to chat."""
+              # Step 1: request upload URL
+              resp = requests.post(REQUEST_SEND_FILE_URL, json={"type": "File"})
+              if resp.status_code != 200:
+                  print(f"requestSendFile error: {resp.status_code} {resp.text}")
+                  return False
+              upload_url = resp.json()["data"]["upload_url"]
+
+              # Step 2: upload the actual file
+              with open(file_path, 'rb') as f:
+                  upload_resp = requests.post(upload_url, files={"file": f})
+              if upload_resp.status_code != 200:
+                  print(f"File upload error: {upload_resp.status_code} {upload_resp.text}")
+                  return False
+              file_id = upload_resp.json()["data"]["file_id"]
+
+              # Step 3: send to chat
+              send_data = {
+                  "chat_id": chat_id,
+                  "file_id": file_id,
+                  "text": "📄 PDF generated"
+              }
+              send_resp = requests.post(SEND_FILE_URL, json=send_data)
+              if send_resp.status_code == 200:
+                  print(f"File sent to Rubika (msg_id: {send_resp.json()['data']['message_id']})")
+                  return True
+              else:
+                  print(f"sendFile error: {send_resp.status_code} {send_resp.text}")
+                  return False
 
           while True:
               subprocess.run(["git", "pull", "origin", BRANCH])
@@ -107,19 +141,18 @@ jobs:
 
                   pdf_path = res.stdout.strip().split("PDF generated: ")[-1]
 
+                  # Commit PDF
                   subprocess.run(["git", "add", pdf_path])
                   subprocess.run(["git", "commit", "-m", f"Add PDF for {url}"])
 
+                  # Send to Rubika
                   chat_id = get_chat_id()
                   if chat_id:
-                      try:
-                          with open(pdf_path, 'rb') as f:
-                              files = {'file': (os.path.basename(pdf_path), f, 'application/pdf')}
-                              data = {'chat_id': chat_id}
-                              requests.post(SEND_FILE_URL, files=files, data=data)
-                      except Exception as e:
-                          print(f"Send failed: {e}")
+                      upload_and_send_file(chat_id, pdf_path)
+                  else:
+                      print("No chat_id – skipping Rubika send")
 
+              # Clear queue
               open(QUEUE, 'w').close()
               subprocess.run(["git", "add", QUEUE])
               subprocess.run(["git", "commit", "-m", "Process queue"])
@@ -127,7 +160,7 @@ jobs:
 
               time.sleep(5)
 
-      - name: Final push
+      - name: Final push (safety)
         if: always()
         run: |
           git add pdfs/ queue.txt || true
