@@ -1,7 +1,7 @@
 name: Polling PDF Generator
 
 on:
-  workflow_dispatch:          # triggered by your laptop bot via /startwf
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -9,32 +9,28 @@ permissions:
 jobs:
   poll-loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 360      # 6 hours – adjust if you need longer
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # Cache pip packages for faster subsequent runs
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
 
-      # Cache Playwright browser binaries
-      - name: Cache Playwright browsers
+      - name: Cache Playwright
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('.github/workflows/poll-loop.yml') }}
 
-      - name: Install system dependencies for Chromium
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -47,25 +43,22 @@ jobs:
             libxshmfence1 libxtst6 libxss1
 
       - name: Install Python packages
-        run: |
-          pip install playwright rubka
+        run: pip install playwright requests
 
-      - name: Install Chromium (if not cached)
+      - name: Install Chromium
         run: playwright install chromium
 
-      # ---------- MAIN POLLING LOOP ----------
       - name: Poll queue, generate PDFs, send to Rubika
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}   # your Rubika bot token (from @RubikaBot)
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}   # توکن ربات روبیکا
         run: |
-          import os, time, subprocess, sys
-          from rubka import Robot
+          import os, time, subprocess, sys, requests
 
-          bot = Robot(token=os.environ["BOT_TOKEN"])
-
+          BOT_TOKEN = os.environ["BOT_TOKEN"]
           QUEUE = "queue.txt"
           CHAT_ID_FILE = "chat_id.txt"
-          REPO_BRANCH = "${{ github.ref_name }}"
+          SEND_FILE_URL = f"https://botapi.rubika.ir/v3/{BOT_TOKEN}/sendFile"
+          BRANCH = "${{ github.ref_name }}"
 
           def get_chat_id():
               try:
@@ -74,72 +67,67 @@ jobs:
               except:
                   return None
 
-          # Main loop – runs until '0' is received
           while True:
-              # Pull any new lines added by the laptop bot
-              subprocess.run(["git", "pull", "origin", REPO_BRANCH])
+              subprocess.run(["git", "pull", "origin", BRANCH])
 
               if not os.path.exists(QUEUE):
                   time.sleep(5)
                   continue
 
               with open(QUEUE) as f:
-                  lines = [line.strip() for line in f if line.strip()]
+                  lines = [l.strip() for l in f if l.strip()]
 
               if not lines:
                   time.sleep(5)
                   continue
 
-              # Check termination signal
               if "0" in lines:
-                  open(QUEUE, 'w').close()   # clear queue
+                  open(QUEUE, 'w').close()
                   subprocess.run(["git", "add", QUEUE])
-                  subprocess.run(["git", "commit", "-m", "Stop signal received"])
+                  subprocess.run(["git", "commit", "-m", "Stop"])
                   subprocess.run(["git", "push"])
-                  print("Stopped by user signal.")
                   break
 
-              # Process each URL
               for url in lines:
                   if url == "0" or not url.startswith(("http://", "https://")):
                       continue
 
-                  # Generate the PDF using your existing script
+                  # تولید PDF
                   res = subprocess.run(
                       [sys.executable, "generate_pdf.py", url, "pdfs"],
                       capture_output=True, text=True
                   )
                   if res.returncode != 0:
-                      continue   # skip on failure (you could add error handling)
+                      continue
 
-                  # Parse the output to get the generated PDF path
-                  output_line = res.stdout.strip()
-                  pdf_path = output_line.split("PDF generated: ")[-1]
+                  pdf_path = res.stdout.strip().split("PDF generated: ")[-1]
 
-                  # Commit the PDF to the repo
+                  # ارسال به مخزن
                   subprocess.run(["git", "add", pdf_path])
                   subprocess.run(["git", "commit", "-m", f"Add PDF for {url}"])
 
-                  # Send PDF to you via Rubika
+                  # ارسال به روبیکا
                   chat_id = get_chat_id()
                   if chat_id:
                       try:
-                          bot.send_document(chat_id, path=pdf_path, text=f"📄 {url}")
+                          with open(pdf_path, 'rb') as f:
+                              files = {'file': (os.path.basename(pdf_path), f, 'application/pdf')}
+                              data = {'chat_id': chat_id}
+                              requests.post(SEND_FILE_URL, files=files, data=data)
                       except Exception as e:
-                          print(f"Failed to send PDF: {e}")
+                          print(f"Send failed: {e}")
 
-              # Clear the processed queue and push changes
+              # پاک کردن صف
               open(QUEUE, 'w').close()
               subprocess.run(["git", "add", QUEUE])
-              subprocess.run(["git", "commit", "-m", "Queue processed"])
+              subprocess.run(["git", "commit", "-m", "Process queue"])
               subprocess.run(["git", "push"])
 
-              time.sleep(5)   # wait 5 seconds before next poll
+              time.sleep(5)
 
-      # Final push just in case (if the loop exits unexpectedly)
-      - name: Ensure everything is pushed
+      - name: Final push
         if: always()
         run: |
           git add pdfs/ queue.txt || true
-          git commit -m "Final cleanup" || true
+          git commit -m "Final commit" || true
           git push || true
