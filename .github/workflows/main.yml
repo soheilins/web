@@ -1,0 +1,54 @@
+name: Generate PDF from URL
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL of the page to convert'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # allows the job to commit files back to the repo
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies for Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 \
+            libxkbcommon0 libxdamage1 libxrandr2 libgbm1 \
+            libasound2 libpangocairo-1.0-0 libxcomposite1 \
+            libxfixes3 libcups2 libatk1.0-0 libpango-1.0-0 \
+            libx11-xcb1 libxcb-dri3-0 libxcb1 libxext6 \
+            libx11-6 libxcb-util1 libgtk-3-0 libgdk-pixbuf2.0-0 \
+            libxshmfence1 libxtst6 libxss1
+
+      - name: Install Python dependencies
+        run: |
+          pip install playwright
+          playwright install chromium
+
+      - name: Generate PDF
+        run: |
+          python generate_pdf.py "${{ inputs.url }}" pdfs
+
+      - name: Commit and push PDF
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pdfs/
+          git commit -m "Add PDF for ${{ inputs.url }}" || echo "No changes to commit"
+          git push
