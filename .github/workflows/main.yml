@@ -7,9 +7,14 @@ on:
         description: 'URL of the page to convert'
         required: true
         type: string
+      extra_clicks:
+        description: 'Comma‑separated button texts to click (e.g., show, show more, expand)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
-  contents: write   # allows pushing PDFs back to the repo
+  contents: write
 
 jobs:
   generate:
@@ -42,8 +47,11 @@ jobs:
           playwright install chromium
 
       - name: Generate PDF
+        env:
+          URL: ${{ inputs.url }}
+          EXTRA_CLICKS: ${{ inputs.extra_clicks }}
         run: |
-          python generate_pdf.py "${{ inputs.url }}" pdfs
+          python generate_pdf.py "$URL" pdfs "$EXTRA_CLICKS"
 
       - name: Commit and push PDF
         run: |
