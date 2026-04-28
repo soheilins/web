@@ -1,7 +1,7 @@
 name: Polling PDF Generator
 
 on:
-  workflow_dispatch:          # triggered by the bot
+  workflow_dispatch:          # triggered by your laptop bot via /startwf
 
 permissions:
   contents: write
@@ -9,7 +9,7 @@ permissions:
 jobs:
   poll-loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 360      # 6 hours (adjust if needed)
+    timeout-minutes: 360      # 6 hours – adjust if you need longer
 
     steps:
       - name: Checkout repo
@@ -20,47 +20,52 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Caching (same as before)
+      # Cache pip packages for faster subsequent runs
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
 
+      # Cache Playwright browser binaries
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('.github/workflows/poll-loop.yml') }}
 
-      - name: Install system deps
+      - name: Install system dependencies for Chromium
         run: |
           sudo apt-get update
-          sudo apt-get install -y libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 \
-            libxkbcommon0 libxdamage1 libxrandr2 libgbm1 libasound2t64 \
-            libpangocairo-1.0-0 libxcomposite1 libxfixes3 libcups2 libatk1.0-0 \
-            libpango-1.0-0 libx11-xcb1 libxcb-dri3-0 libxcb1 libxext6 libx11-6 \
-            libxcb-util1 libgtk-3-0 libgdk-pixbuf2.0-0 libxshmfence1 libxtst6 libxss1
+          sudo apt-get install -y \
+            libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 \
+            libxkbcommon0 libxdamage1 libxrandr2 libgbm1 \
+            libasound2t64 libpangocairo-1.0-0 libxcomposite1 \
+            libxfixes3 libcups2 libatk1.0-0 libpango-1.0-0 \
+            libx11-xcb1 libxcb-dri3-0 libxcb1 libxext6 libx11-6 \
+            libxcb-util1 libgtk-3-0 libgdk-pixbuf2.0-0 \
+            libxshmfence1 libxtst6 libxss1
 
       - name: Install Python packages
-        run: pip install playwright rubika
+        run: |
+          pip install playwright rubka
 
-      - name: Install Chromium
+      - name: Install Chromium (if not cached)
         run: playwright install chromium
 
-      # ---------- MAIN POLLING SCRIPT ----------
-      - name: Poll queue, generate PDFs, send via Rubika
+      # ---------- MAIN POLLING LOOP ----------
+      - name: Poll queue, generate PDFs, send to Rubika
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}   # Rubika bot token
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}   # your Rubika bot token (from @RubikaBot)
         run: |
           import os, time, subprocess, sys
-          from rubika.client import Bot
+          from rubka import Robot
 
-          BOT_TOKEN = os.environ["BOT_TOKEN"]
+          bot = Robot(token=os.environ["BOT_TOKEN"])
+
           QUEUE = "queue.txt"
           CHAT_ID_FILE = "chat_id.txt"
-
-          bot = Bot(BOT_TOKEN)
+          REPO_BRANCH = "${{ github.ref_name }}"
 
           def get_chat_id():
               try:
@@ -69,66 +74,72 @@ jobs:
               except:
                   return None
 
+          # Main loop – runs until '0' is received
           while True:
-              # Pull latest changes (queue.txt may have new lines)
-              subprocess.run(["git", "pull", "origin", "${{ github.ref_name }}"])
+              # Pull any new lines added by the laptop bot
+              subprocess.run(["git", "pull", "origin", REPO_BRANCH])
 
               if not os.path.exists(QUEUE):
                   time.sleep(5)
                   continue
 
               with open(QUEUE) as f:
-                  lines = [l.strip() for l in f if l.strip()]
+                  lines = [line.strip() for line in f if line.strip()]
 
               if not lines:
                   time.sleep(5)
                   continue
 
+              # Check termination signal
               if "0" in lines:
-                  # Stop signal: clear queue, push, exit
-                  open(QUEUE, 'w').close()
+                  open(QUEUE, 'w').close()   # clear queue
                   subprocess.run(["git", "add", QUEUE])
-                  subprocess.run(["git", "commit", "-m", "Stop received"])
+                  subprocess.run(["git", "commit", "-m", "Stop signal received"])
                   subprocess.run(["git", "push"])
-                  print("Stopped by user.")
+                  print("Stopped by user signal.")
                   break
 
-              # Process each line
-              new_lines = []
+              # Process each URL
               for url in lines:
-                  if url == "0":
-                      continue
-                  if not url.startswith(("http://", "https://")):
-                      # Not a valid URL – skip
+                  if url == "0" or not url.startswith(("http://", "https://")):
                       continue
 
-                  # Generate PDF using the same script
-                  res = subprocess.run([sys.executable, "generate_pdf.py", url, "pdfs"],
-                                       capture_output=True, text=True)
+                  # Generate the PDF using your existing script
+                  res = subprocess.run(
+                      [sys.executable, "generate_pdf.py", url, "pdfs"],
+                      capture_output=True, text=True
+                  )
                   if res.returncode != 0:
-                      continue
+                      continue   # skip on failure (you could add error handling)
 
-                  # parse output to find the PDF path
+                  # Parse the output to get the generated PDF path
                   output_line = res.stdout.strip()
-                  pdf_path = output_line.split("PDF generated: ")[-1]  # full path
+                  pdf_path = output_line.split("PDF generated: ")[-1]
 
-                  # Commit the PDF
+                  # Commit the PDF to the repo
                   subprocess.run(["git", "add", pdf_path])
                   subprocess.run(["git", "commit", "-m", f"Add PDF for {url}"])
 
-                  # Send via Rubika
+                  # Send PDF to you via Rubika
                   chat_id = get_chat_id()
                   if chat_id:
                       try:
-                          with open(pdf_path, 'rb') as f:
-                              bot.send_file(chat_id, f, caption=f"📄 {url}")
+                          bot.send_document(chat_id, path=pdf_path, text=f"📄 {url}")
                       except Exception as e:
-                          print(f"Failed to send to Rubika: {e}")
+                          print(f"Failed to send PDF: {e}")
 
-              # Clear processed lines (we removed all valid URLs)
+              # Clear the processed queue and push changes
               open(QUEUE, 'w').close()
               subprocess.run(["git", "add", QUEUE])
               subprocess.run(["git", "commit", "-m", "Queue processed"])
               subprocess.run(["git", "push"])
 
-              time.sleep(5)
+              time.sleep(5)   # wait 5 seconds before next poll
+
+      # Final push just in case (if the loop exits unexpectedly)
+      - name: Ensure everything is pushed
+        if: always()
+        run: |
+          git add pdfs/ queue.txt || true
+          git commit -m "Final cleanup" || true
+          git push || true
