@@ -1,33 +1,33 @@
 import sys, os, uuid
 from playwright.sync_api import sync_playwright
 
-# Desktop viewport – change the resolution if needed
 VIEWPORT = {"width": 1280, "height": 720}
 
 def generate_pdf(url, output_path):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(viewport=VIEWPORT)   # <-- set viewport here
+        page = browser.new_page(viewport=VIEWPORT)
 
-        # Wait for the HTML to load (good for live sites like Twitch)
+        # Wait only for the DOM (Twitch never reaches networkidle)
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
-
-        # Give additional time for visible rendering
         page.wait_for_timeout(4000)
-
         page.emulate_media(media="screen")
+
+        # Measure the full scrollable page height for a single‑page PDF
+        page_height = page.evaluate("document.documentElement.scrollHeight")
+        page_width = VIEWPORT["width"]   # capture exactly the viewport width
+
         page.pdf(
             path=output_path,
-            format="A4",
-            print_background=True,
-            scale=1.0          # avoid automatic shrinking
+            width=f"{page_width}px",
+            height=f"{page_height}px",
+            print_background=True
         )
         browser.close()
 
 if __name__ == "__main__":
     raw_input = sys.argv[1]
 
-    # Auto-prepend https:// if missing
     if raw_input.startswith(("http://", "https://")):
         url = raw_input
     else:
