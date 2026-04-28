@@ -5,7 +5,13 @@ def generate_pdf(url, output_path):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto(url, wait_until="networkidle", timeout=30000)
+
+        # Don't wait for networkidle – Twitch and similar sites never settle
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+        # Give the page a few seconds to render its visible layout
+        page.wait_for_timeout(4000)
+
         page.emulate_media(media="screen")
         page.pdf(path=output_path, format="A4", print_background=True)
         browser.close()
@@ -13,11 +19,10 @@ def generate_pdf(url, output_path):
 if __name__ == "__main__":
     raw_input = sys.argv[1]
 
-    # If the input already has a protocol, use it directly.
+    # Auto-prepend scheme if missing
     if raw_input.startswith(("http://", "https://")):
         url = raw_input
     else:
-        # Otherwise treat it as a hostname/path, prepend https://
         url = "https://" + raw_input
 
     out_dir = sys.argv[2] if len(sys.argv) > 2 else "pdfs"
