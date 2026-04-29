@@ -1,0 +1,125 @@
+name: File Download with Size Logic
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'Direct download URL of the file'
+        required: true
+      chat_id:
+        description: 'Rubika chat ID to send the result to'
+        required: true
+
+jobs:
+  download-and-deliver:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download file and check size
+        id: download
+        run: |
+          URL="${{ github.event.inputs.file_url }}"
+          FILENAME=$(basename "$URL" | sed 's/?.*//')
+          if [ -z "$FILENAME" ]; then
+            FILENAME="downloaded_file"
+          fi
+          mkdir -p downloaded
+          curl -L -o "downloaded/$FILENAME" "$URL"
+          SIZE=$(stat -c%s "downloaded/$FILENAME")
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
+          echo "Downloaded: $FILENAME ($SIZE bytes)"
+
+      - name: Commit file to repo (if size ≤ 100 MB)
+        if: steps.download.outputs.size <= 104857600   # 100 MB
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "downloaded/${{ steps.download.outputs.filename }}"
+          git commit -m "Add file: ${{ steps.download.outputs.filename }}" || echo "Nothing to commit"
+          git pull --rebase origin main
+          git push
+        continue-on-error: true
+
+      - name: Handle file delivery based on size
+        env:
+          RUBIKA_BOT_TOKEN: ${{ secrets.RUBIKA_BOT_TOKEN }}
+          CHAT_ID: ${{ github.event.inputs.chat_id }}
+          FILENAME: ${{ steps.download.outputs.filename }}
+          SIZE: ${{ steps.download.outputs.size }}
+        run: |
+          if [ -z "$RUBIKA_BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "Rubika secret or chat ID missing – skipping delivery."
+            exit 0
+          fi
+
+          send_rubika_message() {
+            curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"$1\"}"
+          }
+
+          SMALL_MAX=$((50 * 1024 * 1024))    # 50 MB
+          MEDIUM_MAX=$((100 * 1024 * 1024))  # 100 MB
+
+          if [ "$SIZE" -le "$SMALL_MAX" ]; then
+            # ≤ 50 MB: upload to Rubika directly
+            FILE_PATH="downloaded/$FILENAME"
+            BASE="https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}"
+
+            EXT="${FILENAME##*.}"
+            if [ "$EXT" = "mp4" ]; then
+              FILE_TYPE="Video"
+            else
+              FILE_TYPE="File"
+            fi
+
+            UPLOAD_RESP=$(curl -s -X POST "${BASE}/requestSendFile" \
+              -H "Content-Type: application/json" \
+              -d "{\"type\":\"${FILE_TYPE}\"}")
+            UPLOAD_URL=$(echo "$UPLOAD_RESP" | jq -r '.data.upload_url // empty')
+            if [ -z "$UPLOAD_URL" ]; then
+              echo "requestSendFile failed - falling back to GitHub link."
+              REPO_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloaded/$FILENAME"
+              send_rubika_message "📁 ${FILENAME}\n⚠️ Rubika upload failed. GitHub direct link:\n${REPO_URL}"
+              exit 0
+            fi
+
+            UPLOAD_FILE_RESP=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" \
+              -F "file=@${FILE_PATH}")
+            HTTP_CODE=$(echo "$UPLOAD_FILE_RESP" | tail -n1)
+            BODY=$(echo "$UPLOAD_FILE_RESP" | sed '$d')
+            FILE_ID=$(echo "$BODY" | jq -r '.data.file_id // empty')
+            if [ -z "$FILE_ID" ]; then
+              echo "File upload failed - falling back to GitHub link."
+              REPO_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloaded/$FILENAME"
+              send_rubika_message "📁 ${FILENAME}\n⚠️ Rubika upload failed. GitHub direct link:\n${REPO_URL}"
+              exit 0
+            fi
+
+            SEND_RESP=$(curl -s -X POST "${BASE}/sendFile" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${CHAT_ID}\",\"file_id\":\"${FILE_ID}\",\"text\":\"📄 ${FILENAME}\"}")
+            MESSAGE_ID=$(echo "$SEND_RESP" | jq -r '.data.message_id // empty')
+            if [ -n "$MESSAGE_ID" ]; then
+              echo "File sent to Rubika successfully."
+            else
+              echo "sendFile failed - falling back to GitHub link."
+              REPO_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloaded/$FILENAME"
+              send_rubika_message "📁 ${FILENAME}\n⚠️ Rubika send failed. GitHub direct link:\n${REPO_URL}"
+            fi
+
+          elif [ "$SIZE" -le "$MEDIUM_MAX" ]; then
+            # 50–100 MB: send GitHub raw link
+            REPO_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloaded/$FILENAME"
+            send_rubika_message "📁 ${FILENAME}\n🔗 Download from GitHub:\n${REPO_URL}"
+          else
+            # > 100 MB: reject
+            rm -f "downloaded/$FILENAME"
+            send_rubika_message "❌ File too large (>100 MB). Not saved."
+          fi
