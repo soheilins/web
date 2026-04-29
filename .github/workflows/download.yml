@@ -48,7 +48,7 @@ jobs:
 
       - name: Handle file delivery based on size
         env:
-          RUBIKA_BOT_TOKEN: ${{ secrets.RUBIKA_BOT_TOKEN }}
+          RUBIKA_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ github.event.inputs.chat_id }}
           FILENAME: ${{ steps.download.outputs.filename }}
           SIZE: ${{ steps.download.outputs.size }}
