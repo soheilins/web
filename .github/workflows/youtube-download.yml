@@ -1,4 +1,4 @@
-name: YouTube Download (Auto Quality)
+name: YouTube Download (User‑Selected Quality)
 
 on:
   workflow_dispatch:
@@ -6,6 +6,10 @@ on:
       video_url:
         description: 'YouTube video URL'
         required: true
+      quality:
+        description: 'Desired quality (e.g. 720p, best)'
+        required: true
+        default: '720p'
       chat_id:
         description: 'Rubika chat ID to send the result to'
         required: true
@@ -26,38 +30,42 @@ jobs:
           sudo apt install -y ffmpeg
           pip install --upgrade yt-dlp
 
-      - name: Connect to Cloudflare WARP (bypass YouTube blocks)
+      - name: Connect to Cloudflare WARP
         uses: viperadnan-git/setup-warp@v1
         with:
           mode: client
           stack: ipv4
 
-      - name: Download best quality under 100MB
+      - name: Download video with selected quality
         id: download
         run: |
           mkdir -p downloads
-          URL="${{ github.event.inputs.video_url }}"
+          QUALITY="${{ github.event.inputs.quality }}"
 
-          # yt-dlp will first get all formats, then we'll pick the best mp4 under 100MB
-          # The command below fetches the best video+audio merged as mp4 with a size limit
-          yt-dlp -f "bestvideo[ext=mp4][filesize<100M]+bestaudio[ext=m4a]/best[ext=mp4][filesize<100M]/best" \
+          if [ "$QUALITY" = "best" ]; then
+            FORMAT="bestvideo+bestaudio/best"
+          else
+            # Remove trailing 'p' if present to get height
+            HEIGHT=$(echo "$QUALITY" | sed 's/p//')
+            FORMAT="bestvideo[height<=${HEIGHT}]+bestaudio/best[height<=${HEIGHT}]"
+          fi
+
+          yt-dlp -f "$FORMAT" \
             -o "downloads/video.%(ext)s" \
             --merge-output-format mp4 \
             --extractor-arg "youtube:player_client=android" \
-            "$URL"
+            "${{ github.event.inputs.video_url }}"
 
-          # Get size and set output variables
           SIZE=$(stat -c%s downloads/video.mp4)
           echo "size=$SIZE" >> $GITHUB_OUTPUT
-          echo "file=downloads/video.mp4" >> $GITHUB_OUTPUT
           echo "Downloaded: $(du -h downloads/video.mp4 | cut -f1)"
 
-      - name: Commit video to repo (always)
+      - name: Commit video to repo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add downloads/video.mp4
-          git commit -m "Add YouTube video from ${{ github.event.inputs.video_url }}" || echo "No changes"
+          git commit -m "Add YouTube video (${{ github.event.inputs.quality }}) from ${{ github.event.inputs.video_url }}" || echo "No changes"
           git pull --rebase origin main
           git push
 
@@ -69,8 +77,8 @@ jobs:
         run: |
           FILE_PATH="downloads/video.mp4"
           SIZE=${{ steps.download.outputs.size }}
-          SMALL_MAX=$((50 * 1024 * 1024))   # 50 MB
-          MEDIUM_MAX=$((100 * 1024 * 1024))  # 100 MB
+          SMALL_MAX=$((50 * 1024 * 1024))
+          MEDIUM_MAX=$((100 * 1024 * 1024))
 
           if [ -z "$RUBIKA_BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
             echo "Rubika secrets missing – skipping delivery."
@@ -84,49 +92,40 @@ jobs:
           }
 
           if [ "$SIZE" -le "$SMALL_MAX" ]; then
-            # ≤ 50 MB: upload directly to Rubika
             BASE="https://botapi.rubika.ir/v3/$RUBIKA_BOT_TOKEN"
 
-            # request upload URL (Video type)
             UPLOAD_RESP=$(curl -s -X POST "$BASE/requestSendFile" -H "Content-Type: application/json" -d '{"type":"Video"}')
             UPLOAD_URL=$(echo "$UPLOAD_RESP" | jq -r '.data.upload_url // empty')
             if [ -z "$UPLOAD_URL" ]; then
-              echo "requestSendFile failed – fallback to GitHub link."
               RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
               send_rubika_message "📹 YouTube video downloaded.\n⚠️ Rubika upload failed. GitHub link: ${RAW_URL}"
               exit 0
             fi
 
-            # upload file
             UPLOAD_FILE_RESP=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" -F "file=@${FILE_PATH}")
             HTTP_CODE=$(echo "$UPLOAD_FILE_RESP" | tail -n1)
             BODY=$(echo "$UPLOAD_FILE_RESP" | sed '$d')
             FILE_ID=$(echo "$BODY" | jq -r '.data.file_id // empty')
             if [ -z "$FILE_ID" ]; then
-              echo "File upload failed – fallback to GitHub link."
               RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
               send_rubika_message "📹 YouTube video downloaded.\n⚠️ Rubika upload failed. GitHub link: ${RAW_URL}"
               exit 0
             fi
 
-            # send to chat
             SEND_RESP=$(curl -s -X POST "$BASE/sendFile" -H "Content-Type: application/json" \
               -d "{\"chat_id\":\"${CHAT_ID}\",\"file_id\":\"${FILE_ID}\",\"text\":\"📹 YouTube video\"}")
             MESSAGE_ID=$(echo "$SEND_RESP" | jq -r '.data.message_id // empty')
             if [ -n "$MESSAGE_ID" ]; then
               echo "Video sent to Rubika."
             else
-              echo "sendFile failed – fallback to GitHub link."
               RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
               send_rubika_message "📹 YouTube video downloaded.\n⚠️ Rubika send failed. GitHub link: ${RAW_URL}"
             fi
 
           elif [ "$SIZE" -le "$MEDIUM_MAX" ]; then
-            # 50–100 MB: send GitHub raw link
             RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
             send_rubika_message "📹 YouTube video downloaded (50–100 MB).\n🔗 Download: ${RAW_URL}"
           else
-            # > 100 MB (should not happen with our format selection, but just in case)
             rm -f downloads/video.mp4
             send_rubika_message "❌ Video too large (>100 MB). Not saved."
           fi
