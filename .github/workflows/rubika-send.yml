@@ -1,0 +1,75 @@
+name: Rubika Delivery (No VPN)
+
+on:
+  repository_dispatch:
+    types: [rubika-send]
+
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Send file to Rubika (or link)
+        env:
+          RUBIKA_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          FILE_PATH: ${{ github.event.client_payload.file }}
+          SIZE: ${{ github.event.client_payload.size }}
+        run: |
+          SMALL_MAX=$((50 * 1024 * 1024))   # 50 MB
+          MEDIUM_MAX=$((100 * 1024 * 1024))  # 100 MB
+
+          if [ -z "$RUBIKA_BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "Secrets missing."
+            exit 0
+          fi
+
+          send_message() {
+            curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"$1\"}"
+          }
+
+          if [ "$SIZE" -le "$SMALL_MAX" ]; then
+            BASE="https://botapi.rubika.ir/v3/$RUBIKA_BOT_TOKEN"
+
+            # 1. Request upload URL
+            UPLOAD_RESP=$(curl -s -X POST "$BASE/requestSendFile" -H "Content-Type: application/json" -d '{"type":"Video"}')
+            UPLOAD_URL=$(echo "$UPLOAD_RESP" | jq -r '.data.upload_url // empty')
+            if [ -z "$UPLOAD_URL" ]; then
+              RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/${FILE_PATH}"
+              send_message "📹 Video downloaded.\n⚠️ Rubika upload failed. Download: ${RAW_URL}"
+              exit 0
+            fi
+
+            # 2. Upload file
+            UPLOAD_FILE_RESP=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" -F "file=@${FILE_PATH}")
+            HTTP_CODE=$(echo "$UPLOAD_FILE_RESP" | tail -n1)
+            BODY=$(echo "$UPLOAD_FILE_RESP" | sed '$d')
+            FILE_ID=$(echo "$BODY" | jq -r '.data.file_id // empty')
+            if [ -z "$FILE_ID" ]; then
+              RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/${FILE_PATH}"
+              send_message "📹 Video downloaded.\n⚠️ Rubika upload failed. Download: ${RAW_URL}"
+              exit 0
+            fi
+
+            # 3. Send to chat
+            SEND_RESP=$(curl -s -X POST "$BASE/sendFile" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${CHAT_ID}\",\"file_id\":\"${FILE_ID}\",\"text\":\"📹 YouTube video\"}")
+            MESSAGE_ID=$(echo "$SEND_RESP" | jq -r '.data.message_id // empty')
+            if [ -n "$MESSAGE_ID" ]; then
+              echo "Video sent to Rubika successfully."
+            else
+              RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/${FILE_PATH}"
+              send_message "📹 Video downloaded.\n⚠️ Rubika send failed. Download: ${RAW_URL}"
+            fi
+
+          elif [ "$SIZE" -le "$MEDIUM_MAX" ]; then
+            RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/${FILE_PATH}"
+            send_message "📹 Video downloaded (50–100 MB).\n🔗 Download: ${RAW_URL}"
+          else
+            send_message "❌ Video too large (>100 MB). Not saved."
+          fi
