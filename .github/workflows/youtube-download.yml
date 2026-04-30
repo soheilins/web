@@ -15,39 +15,35 @@ on:
         required: true
 
 jobs:
-  download-and-commit:
+  download-and-deliver:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install yt-dlp, FFmpeg, and PO‑token tools
+      - name: Install yt-dlp & FFmpeg
         run: |
           sudo apt update
           sudo apt install -y ffmpeg
           pip install --upgrade yt-dlp
-          pip install -U bgutil-ytdlp-pot-provider
 
-      - name: Start PO‑token provider (server)
-        run: |
-          # Run the provider in the background on port 4416
-          bgutil-ytdlp-pot-provider server --port 4416 &
-          # Give it a moment to start
-          sleep 3
-          # Health check
-          curl -s http://127.0.0.1:4416/health || echo "Provider may still be starting…"
+      - name: Connect to Cloudflare WARP
+        uses: viperadnan-git/setup-warp@v1
+        with:
+          mode: client
+          stack: ipv4
 
-      - name: Download video with selected quality
+      - name: Download video with selected quality (auto fallback)
         id: download
         run: |
           mkdir -p downloads
           QUALITY="${{ github.event.inputs.quality }}"
           URL="${{ github.event.inputs.video_url }}"
 
+          # Build format string
           if [ "$QUALITY" = "best" ]; then
             FORMAT="bestvideo+bestaudio/best"
           else
@@ -55,20 +51,45 @@ jobs:
             FORMAT="bestvideo[height<=${HEIGHT}]+bestaudio/best[height<=${HEIGHT}]/best"
           fi
 
-          yt-dlp -f "$FORMAT" \
-            -o "downloads/video.%(ext)s" \
-            --merge-output-format mp4 \
-            --no-playlist \
-            --extractor-args "youtube:pot_provider=http://127.0.0.1:4416" \
-            "$URL"
+          # First attempt – web_safari client (no PO token needed)
+          echo "Trying format: $FORMAT with web_safari client"
+          if yt-dlp -f "$FORMAT" \
+               -o "downloads/video.%(ext)s" \
+               --merge-output-format mp4 \
+               --no-playlist \
+               --extractor-args "youtube:player_client=web_safari;formats=missing_pot" \
+               "$URL"; then
+            echo "Downloaded with requested quality (web_safari)."
+          elif yt-dlp -f "$FORMAT" \
+               -o "downloads/video.%(ext)s" \
+               --merge-output-format mp4 \
+               --no-playlist \
+               --extractor-args "youtube:player_client=ios;formats=missing_pot" \
+               "$URL"; then
+            echo "Downloaded with requested quality (ios client)."
+          elif yt-dlp -f "$FORMAT" \
+               -o "downloads/video.%(ext)s" \
+               --merge-output-format mp4 \
+               --no-playlist \
+               --extractor-args "youtube:player_client=tv;formats=missing_pot" \
+               "$URL"; then
+            echo "Downloaded with requested quality (tv client)."
+          else
+            echo "Requested quality failed – falling back to best available."
+            yt-dlp -f "bestvideo+bestaudio/best" \
+                   -o "downloads/video.%(ext)s" \
+                   --merge-output-format mp4 \
+                   --no-playlist \
+                   --extractor-args "youtube:formats=missing_pot" \
+                   "$URL" || {
+                     echo "Download completely failed."
+                     exit 1
+                   }
+          fi
 
           SIZE=$(stat -c%s downloads/video.mp4)
           echo "size=$SIZE" >> $GITHUB_OUTPUT
           echo "Downloaded: $(du -h downloads/video.mp4 | cut -f1)"
-
-      - name: Stop PO‑token provider
-        if: always()
-        run: pkill -f bgutil-ytdlp-pot-provider || true
 
       - name: Commit video to repo
         run: |
@@ -79,10 +100,63 @@ jobs:
           git pull --rebase origin main
           git push
 
-      - name: Trigger Rubika delivery workflow
+      - name: Deliver video based on size
+        env:
+          RUBIKA_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ github.event.inputs.chat_id }}
+          SIZE: ${{ steps.download.outputs.size }}
         run: |
-          curl -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/dispatches \
-            -d '{"event_type":"rubika-send","client_payload":{"chat_id":"${{ github.event.inputs.chat_id }}","file":"downloads/video.mp4","size":"${{ steps.download.outputs.size }}"}}'
+          FILE_PATH="downloads/video.mp4"
+          SIZE=${{ steps.download.outputs.size }}
+          SMALL_MAX=$((50 * 1024 * 1024))
+          MEDIUM_MAX=$((100 * 1024 * 1024))
+
+          if [ -z "$RUBIKA_BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "Rubika secrets missing – skipping delivery."
+            exit 0
+          fi
+
+          send_rubika_message() {
+            curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"$1\"}"
+          }
+
+          if [ "$SIZE" -le "$SMALL_MAX" ]; then
+            BASE="https://botapi.rubika.ir/v3/$RUBIKA_BOT_TOKEN"
+
+            UPLOAD_RESP=$(curl -s -X POST "$BASE/requestSendFile" -H "Content-Type: application/json" -d '{"type":"Video"}')
+            UPLOAD_URL=$(echo "$UPLOAD_RESP" | jq -r '.data.upload_url // empty')
+            if [ -z "$UPLOAD_URL" ]; then
+              RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
+              send_rubika_message "📹 YouTube video downloaded.\n⚠️ Rubika upload failed. GitHub link: ${RAW_URL}"
+              exit 0
+            fi
+
+            UPLOAD_FILE_RESP=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" -F "file=@${FILE_PATH}")
+            HTTP_CODE=$(echo "$UPLOAD_FILE_RESP" | tail -n1)
+            BODY=$(echo "$UPLOAD_FILE_RESP" | sed '$d')
+            FILE_ID=$(echo "$BODY" | jq -r '.data.file_id // empty')
+            if [ -z "$FILE_ID" ]; then
+              RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
+              send_rubika_message "📹 YouTube video downloaded.\n⚠️ Rubika upload failed. GitHub link: ${RAW_URL}"
+              exit 0
+            fi
+
+            SEND_RESP=$(curl -s -X POST "$BASE/sendFile" -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${CHAT_ID}\",\"file_id\":\"${FILE_ID}\",\"text\":\"📹 YouTube video\"}")
+            MESSAGE_ID=$(echo "$SEND_RESP" | jq -r '.data.message_id // empty')
+            if [ -n "$MESSAGE_ID" ]; then
+              echo "Video sent to Rubika."
+            else
+              RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
+              send_rubika_message "📹 YouTube video downloaded.\n⚠️ Rubika send failed. GitHub link: ${RAW_URL}"
+            fi
+
+          elif [ "$SIZE" -le "$MEDIUM_MAX" ]; then
+            RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
+            send_rubika_message "📹 YouTube video downloaded (50–100 MB).\n🔗 Download: ${RAW_URL}"
+          else
+            rm -f downloads/video.mp4
+            send_rubika_message "❌ Video too large (>100 MB). Not saved."
+          fi
