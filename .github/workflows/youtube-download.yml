@@ -25,25 +25,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install yt-dlp, FFmpeg, and PO‑Token plugin
+      - name: Install yt-dlp, FFmpeg, and PO‑token tools
         run: |
           sudo apt update
           sudo apt install -y ffmpeg
           pip install --upgrade yt-dlp
           pip install -U bgutil-ytdlp-pot-provider
 
-      - name: Start PO‑Token provider (Docker)
+      - name: Start PO‑token provider (server)
         run: |
-          docker run --name bgutil-provider -d -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
-          # Wait for the server to be ready
-          for i in $(seq 1 10); do
-            if curl -s http://127.0.0.1:4416/health > /dev/null 2>&1; then
-              echo "PO‑Token provider is ready."
-              break
-            fi
-            echo "Waiting for PO‑Token provider…"
-            sleep 2
-          done
+          # Run the provider in the background on port 4416
+          bgutil-ytdlp-pot-provider server --port 4416 &
+          # Give it a moment to start
+          sleep 3
+          # Health check
+          curl -s http://127.0.0.1:4416/health || echo "Provider may still be starting…"
 
       - name: Download video with selected quality
         id: download
@@ -63,15 +59,16 @@ jobs:
             -o "downloads/video.%(ext)s" \
             --merge-output-format mp4 \
             --no-playlist \
+            --extractor-args "youtube:pot_provider=http://127.0.0.1:4416" \
             "$URL"
 
           SIZE=$(stat -c%s downloads/video.mp4)
           echo "size=$SIZE" >> $GITHUB_OUTPUT
           echo "Downloaded: $(du -h downloads/video.mp4 | cut -f1)"
 
-      - name: Stop PO‑Token container
+      - name: Stop PO‑token provider
         if: always()
-        run: docker stop bgutil-provider && docker rm bgutil-provider || true
+        run: pkill -f bgutil-ytdlp-pot-provider || true
 
       - name: Commit video to repo
         run: |
