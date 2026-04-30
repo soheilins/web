@@ -1,0 +1,27 @@
+name: Send YouTube Link to Rubika
+
+on:
+  repository_dispatch:
+    types: [send-youtube-link]
+
+jobs:
+  send-link:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send link via Rubika
+        env:
+          RUBIKA_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          FILE: ${{ github.event.client_payload.file }}
+        run: |
+          if [ -z "$RUBIKA_BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "Missing secrets – exiting."
+            exit 0
+          fi
+
+          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/${FILE}"
+          MESSAGE="📹 YouTube video saved\n🔗 ${RAW_URL}"
+
+          curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"${MESSAGE}\"}"
