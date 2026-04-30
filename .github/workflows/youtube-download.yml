@@ -36,25 +36,56 @@ jobs:
           mode: client
           stack: ipv4
 
-      - name: Download video with selected quality
+      - name: Download video with selected quality (auto fallback)
         id: download
         run: |
           mkdir -p downloads
           QUALITY="${{ github.event.inputs.quality }}"
+          URL="${{ github.event.inputs.video_url }}"
 
+          # Build format string
           if [ "$QUALITY" = "best" ]; then
             FORMAT="bestvideo+bestaudio/best"
           else
-            # Remove trailing 'p' if present to get height
             HEIGHT=$(echo "$QUALITY" | sed 's/p//')
-            FORMAT="bestvideo[height<=${HEIGHT}]+bestaudio/best[height<=${HEIGHT}]"
+            FORMAT="bestvideo[height<=${HEIGHT}]+bestaudio/best[height<=${HEIGHT}]/best"
           fi
 
-          yt-dlp -f "$FORMAT" \
-            -o "downloads/video.%(ext)s" \
-            --merge-output-format mp4 \
-            --extractor-arg "youtube:player_client=android" \
-            "${{ github.event.inputs.video_url }}"
+          # First attempt – web_safari client (no PO token needed)
+          echo "Trying format: $FORMAT with web_safari client"
+          if yt-dlp -f "$FORMAT" \
+               -o "downloads/video.%(ext)s" \
+               --merge-output-format mp4 \
+               --no-playlist \
+               --extractor-args "youtube:player_client=web_safari;formats=missing_pot" \
+               "$URL"; then
+            echo "Downloaded with requested quality (web_safari)."
+          elif yt-dlp -f "$FORMAT" \
+               -o "downloads/video.%(ext)s" \
+               --merge-output-format mp4 \
+               --no-playlist \
+               --extractor-args "youtube:player_client=ios;formats=missing_pot" \
+               "$URL"; then
+            echo "Downloaded with requested quality (ios client)."
+          elif yt-dlp -f "$FORMAT" \
+               -o "downloads/video.%(ext)s" \
+               --merge-output-format mp4 \
+               --no-playlist \
+               --extractor-args "youtube:player_client=tv;formats=missing_pot" \
+               "$URL"; then
+            echo "Downloaded with requested quality (tv client)."
+          else
+            echo "Requested quality failed – falling back to best available."
+            yt-dlp -f "bestvideo+bestaudio/best" \
+                   -o "downloads/video.%(ext)s" \
+                   --merge-output-format mp4 \
+                   --no-playlist \
+                   --extractor-args "youtube:formats=missing_pot" \
+                   "$URL" || {
+                     echo "Download completely failed."
+                     exit 1
+                   }
+          fi
 
           SIZE=$(stat -c%s downloads/video.mp4)
           echo "size=$SIZE" >> $GITHUB_OUTPUT
