@@ -1,4 +1,4 @@
-name: YouTube Download (User‑Selected Quality)
+name: YouTube Download (Link Only)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ on:
         required: true
 
 jobs:
-  download-and-deliver:
+  download-and-link:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -43,7 +43,6 @@ jobs:
           QUALITY="${{ github.event.inputs.quality }}"
           URL="${{ github.event.inputs.video_url }}"
 
-          # Build format string
           if [ "$QUALITY" = "best" ]; then
             FORMAT="bestvideo+bestaudio/best"
           else
@@ -51,7 +50,6 @@ jobs:
             FORMAT="bestvideo[height<=${HEIGHT}]+bestaudio/best[height<=${HEIGHT}]/best"
           fi
 
-          # First attempt – web_safari client (no PO token needed)
           echo "Trying format: $FORMAT with web_safari client"
           if yt-dlp -f "$FORMAT" \
                -o "downloads/video.%(ext)s" \
@@ -75,16 +73,13 @@ jobs:
                "$URL"; then
             echo "Downloaded with requested quality (tv client)."
           else
-            echo "Requested quality failed – falling back to best available."
+            echo "Falling back to best available."
             yt-dlp -f "bestvideo+bestaudio/best" \
                    -o "downloads/video.%(ext)s" \
                    --merge-output-format mp4 \
                    --no-playlist \
                    --extractor-args "youtube:formats=missing_pot" \
-                   "$URL" || {
-                     echo "Download completely failed."
-                     exit 1
-                   }
+                   "$URL" || { echo "Download completely failed."; exit 1; }
           fi
 
           SIZE=$(stat -c%s downloads/video.mp4)
@@ -100,63 +95,27 @@ jobs:
           git pull --rebase origin main
           git push
 
-      - name: Deliver video based on size
+      - name: Send download link via Rubika
         env:
           RUBIKA_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ github.event.inputs.chat_id }}
           SIZE: ${{ steps.download.outputs.size }}
         run: |
-          FILE_PATH="downloads/video.mp4"
           SIZE=${{ steps.download.outputs.size }}
-          SMALL_MAX=$((50 * 1024 * 1024))
-          MEDIUM_MAX=$((100 * 1024 * 1024))
+          MAX_SIZE=$((100 * 1024 * 1024))  # 100 MB
 
           if [ -z "$RUBIKA_BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-            echo "Rubika secrets missing – skipping delivery."
+            echo "Rubika secrets missing – skipping notification."
             exit 0
           fi
 
-          send_rubika_message() {
-            curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendMessage" \
-              -H "Content-Type: application/json" \
-              -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"$1\"}"
-          }
-
-          if [ "$SIZE" -le "$SMALL_MAX" ]; then
-            BASE="https://botapi.rubika.ir/v3/$RUBIKA_BOT_TOKEN"
-
-            UPLOAD_RESP=$(curl -s -X POST "$BASE/requestSendFile" -H "Content-Type: application/json" -d '{"type":"Video"}')
-            UPLOAD_URL=$(echo "$UPLOAD_RESP" | jq -r '.data.upload_url // empty')
-            if [ -z "$UPLOAD_URL" ]; then
-              RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
-              send_rubika_message "📹 YouTube video downloaded.\n⚠️ Rubika upload failed. GitHub link: ${RAW_URL}"
-              exit 0
-            fi
-
-            UPLOAD_FILE_RESP=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" -F "file=@${FILE_PATH}")
-            HTTP_CODE=$(echo "$UPLOAD_FILE_RESP" | tail -n1)
-            BODY=$(echo "$UPLOAD_FILE_RESP" | sed '$d')
-            FILE_ID=$(echo "$BODY" | jq -r '.data.file_id // empty')
-            if [ -z "$FILE_ID" ]; then
-              RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
-              send_rubika_message "📹 YouTube video downloaded.\n⚠️ Rubika upload failed. GitHub link: ${RAW_URL}"
-              exit 0
-            fi
-
-            SEND_RESP=$(curl -s -X POST "$BASE/sendFile" -H "Content-Type: application/json" \
-              -d "{\"chat_id\":\"${CHAT_ID}\",\"file_id\":\"${FILE_ID}\",\"text\":\"📹 YouTube video\"}")
-            MESSAGE_ID=$(echo "$SEND_RESP" | jq -r '.data.message_id // empty')
-            if [ -n "$MESSAGE_ID" ]; then
-              echo "Video sent to Rubika."
-            else
-              RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
-              send_rubika_message "📹 YouTube video downloaded.\n⚠️ Rubika send failed. GitHub link: ${RAW_URL}"
-            fi
-
-          elif [ "$SIZE" -le "$MEDIUM_MAX" ]; then
-            RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
-            send_rubika_message "📹 YouTube video downloaded (50–100 MB).\n🔗 Download: ${RAW_URL}"
+          if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+            MESSAGE="❌ Video too large (>100 MB). Not saved."
           else
-            rm -f downloads/video.mp4
-            send_rubika_message "❌ Video too large (>100 MB). Not saved."
+            RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/downloads/video.mp4"
+            MESSAGE="📹 YouTube video downloaded.\n🔗 Download: ${RAW_URL}"
           fi
+
+          curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"${MESSAGE}\"}"
