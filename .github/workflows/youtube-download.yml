@@ -18,26 +18,34 @@ jobs:
   download-and-commit:
     runs-on: ubuntu-latest
     permissions:
-      contents: write      # for committing the video
-      actions: write       # for triggering the next workflow
+      contents: write
+      actions: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install yt-dlp & FFmpeg
+      - name: Install yt-dlp, FFmpeg, and PO‑Token plugin
         run: |
           sudo apt update
           sudo apt install -y ffmpeg
           pip install --upgrade yt-dlp
+          pip install -U bgutil-ytdlp-pot-provider
 
-      - name: Connect to Cloudflare WARP
-        uses: viperadnan-git/setup-warp@v1
-        with:
-          mode: client
-          stack: ipv4
+      - name: Start PO‑Token provider (Docker)
+        run: |
+          docker run --name bgutil-provider -d -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
+          # Wait for the server to be ready
+          for i in $(seq 1 10); do
+            if curl -s http://127.0.0.1:4416/health > /dev/null 2>&1; then
+              echo "PO‑Token provider is ready."
+              break
+            fi
+            echo "Waiting for PO‑Token provider…"
+            sleep 2
+          done
 
-      - name: Download video with selected quality (auto fallback)
+      - name: Download video with selected quality
         id: download
         run: |
           mkdir -p downloads
@@ -51,41 +59,19 @@ jobs:
             FORMAT="bestvideo[height<=${HEIGHT}]+bestaudio/best[height<=${HEIGHT}]/best"
           fi
 
-          echo "Trying format: $FORMAT with web_safari client"
-          if yt-dlp -f "$FORMAT" \
-               -o "downloads/video.%(ext)s" \
-               --merge-output-format mp4 \
-               --no-playlist \
-               --extractor-args "youtube:player_client=web_safari;formats=missing_pot" \
-               "$URL"; then
-            echo "Downloaded with requested quality (web_safari)."
-          elif yt-dlp -f "$FORMAT" \
-               -o "downloads/video.%(ext)s" \
-               --merge-output-format mp4 \
-               --no-playlist \
-               --extractor-args "youtube:player_client=ios;formats=missing_pot" \
-               "$URL"; then
-            echo "Downloaded with requested quality (ios client)."
-          elif yt-dlp -f "$FORMAT" \
-               -o "downloads/video.%(ext)s" \
-               --merge-output-format mp4 \
-               --no-playlist \
-               --extractor-args "youtube:player_client=tv;formats=missing_pot" \
-               "$URL"; then
-            echo "Downloaded with requested quality (tv client)."
-          else
-            echo "Falling back to best available."
-            yt-dlp -f "bestvideo+bestaudio/best" \
-                   -o "downloads/video.%(ext)s" \
-                   --merge-output-format mp4 \
-                   --no-playlist \
-                   --extractor-args "youtube:formats=missing_pot" \
-                   "$URL" || { echo "Download completely failed."; exit 1; }
-          fi
+          yt-dlp -f "$FORMAT" \
+            -o "downloads/video.%(ext)s" \
+            --merge-output-format mp4 \
+            --no-playlist \
+            "$URL"
 
           SIZE=$(stat -c%s downloads/video.mp4)
           echo "size=$SIZE" >> $GITHUB_OUTPUT
           echo "Downloaded: $(du -h downloads/video.mp4 | cut -f1)"
+
+      - name: Stop PO‑Token container
+        if: always()
+        run: docker stop bgutil-provider && docker rm bgutil-provider || true
 
       - name: Commit video to repo
         run: |
